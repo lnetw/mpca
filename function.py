@@ -1,70 +1,9 @@
 from IPython.display import HTML
 import random
-from pymongo import MongoClient
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import plotly.graph_objs as go
-import config
-
-client = MongoClient(config.mongo_db)
-
-
-def read_mongo(db, collection, query={}, no_id=True, proj='not'):
-    """
-    Считывание с MongoDB и удаление дубликатов
-    """
-
-    if proj == 'not':
-        cursor = db[collection].find(query)
-    else:
-        cursor = db[collection].find(query, proj)
-    # Expand the cursor and construct the DataFrame
-    df = pd.DataFrame(list(cursor))
-    if '_id' in list(df.columns) and no_id:
-        del df['_id']
-    if 'TM' in list(df.columns):
-        df.drop_duplicates(subset="TM", inplace=True, keep="first")  # удалить собранные дубли
-    return df
-
-
-def read_processes():
-    """
-    Обертка для прочтения процессов
-    """
-
-    db = client['bihive-dev']
-    collection = 'asu-process'
-    data = read_mongo(db, collection)
-    data['seria'] = data['ProcName'] + '***' + data['OsUnitName']
-    data = data.reset_index()
-    client.close()
-    return data
-
-
-def read_sensors(train_vessel_id, start, end, required_sensors, sensors_name):
-    """
-    Создает таблицу с данными по серии (на)
-    """
-    sensors = [x for x in required_sensors if train_vessel_id in x]
-    db = client['asu-bioreactors']
-    data_merge = pd.DataFrame()
-    data_merge['TM'] = ''
-    for sens in sensors:
-        collection = sens
-        query = {
-            'TM': {
-                '$gt': start,
-                '$lt': end
-            }
-        }
-        data = read_mongo(db, collection, query=query, proj={'TM': 1, 'VAL': 1})
-        data = data.rename(columns={'VAL': sensors_name[sens[4:8] + sens[15:]]})  # человеческое название для параметра
-        try:
-            data_merge = pd.merge(data_merge, data, how='outer', on='TM')  # оптимизирвоать индексы
-        except KeyError:
-            print(sens)
-    return data_merge
 
 
 def constant_feature_detect(data, threshold=0.99):
@@ -80,42 +19,6 @@ def constant_feature_detect(data, threshold=0.99):
             quasi_constant_feature.append({feature: [predominant, data_copy[feature].value_counts().index[0]]})
     # print(len(quasi_constant_feature),'константные переменные')
     return quasi_constant_feature
-
-
-def check_sensors(required_sensors, train_vessel_id, start, end):
-    """
-    Проверяет есть ли все данные за серию по нужным датчикам
-    """
-
-    sensors = [x for x in required_sensors if train_vessel_id in x]
-
-    time_proc = (datetime.strptime(end, "%Y-%m-%d %H:%M:%S") - datetime.strptime(start, "%Y-%m-%d %H:%M:%S"))
-    time_proc_minutes = (time_proc.days * 24 * 60) + (time_proc.seconds / 60)
-    print('Begin---', train_vessel_id)
-    db = client['asu-bioreactors']
-    state = 'OK'
-    X_sensor = ''
-
-    for sens in sensors:
-        collection = sens
-        query = {
-            'TM': {
-                '$gt': start,
-                '$lt': end
-            }
-        }
-        data = read_mongo(db, collection, query=query, proj={'TM': 1, })
-
-        if len(data) >= (time_proc_minutes - 1):
-            pass
-        else:
-            X_sensor += sens
-            print(train_vessel_id, 'error in', sens, 'at time', start, ' --', end)
-            return X_sensor
-
-    print(train_vessel_id, 'OK', sep='-----')
-    return state
-
 
 def hide_toggle(for_next=False):
     """
@@ -153,41 +56,6 @@ def hide_toggle(for_next=False):
     )
 
     return HTML(html)
-
-
-def get_df(series, vessel, list_sensor):
-    """
-    Функция для получения данных
-    """
-    # Список все нужных датчиков
-    required_sensors = []
-    all_sensors = client['asu-bioreactors'].list_collection_names()
-    for sens in list_sensor:
-        required_sensors.append([x for x in all_sensors if sens in x])
-    required_sensors = sum(required_sensors, [])
-
-    # Создание словаря датчик-имя
-    db = client['bihive-dev']
-    sensors_name = read_mongo(db, 'asu-spc', query={})
-    sensors_name = dict(zip(sensors_name['collection'], sensors_name['DevDescr']))
-    # Список всех процессов
-    data_processes = read_processes()
-
-    # Выбор интересующих нас процессов
-    proc = data_processes[data_processes['ProcName'].isin(series)]
-    proc = proc[proc['OsUnitName'].str[4:9] == vessel].reset_index(drop=True)
-
-    # Чтение интересующих нас датчиков
-    proc['data'] = ''
-    for i in proc.index:
-        if proc['ProcStop'][i] == 'NULL' or proc['ProcStart'][i] == 'NULL':
-            proc.drop(i, axis=0, inplace=True)
-        elif check_sensors(required_sensors, proc['UnitID'][i], proc['ProcStart'][i], proc['ProcStop'][i]) == 'OK':
-            proc['data'][i] = read_sensors(proc['UnitID'][i], proc['ProcStart'][i], proc['ProcStop'][i],
-                                           required_sensors, sensors_name)
-
-    return proc
-
 
 def plot_Q2(Q2, Q_005, Q_001, label):
     """
